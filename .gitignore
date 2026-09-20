@@ -1,4 +1,6 @@
 *.xlsx
+*.rds
+results/
 .Rhistory
 .RData
 .Rproj.user/
