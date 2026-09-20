@@ -77,7 +77,8 @@ stopifnot(all(colnames(counts_pass) == metadata_pass$MatrixID))
 cat("QC-pass samples:", ncol(counts_pass), "\n")
 print(table(metadata_pass$TissueType))
 
-## Define the marker panel 
+## Define the marker panel (EDIT THIS to use any desired set of genes)
+## 'Symbol' is the official gene symbol, in capitals, add or remove rows as needed 
 marker_genes <- tibble::tibble(
   Symbol = c("TFF3", "ANXA10", "LGALS4", "ERBB2", "GATA4", "GATA6", "VEGFA",
              "CDX2", "MUC2", "KRT7", "KRT20"),
