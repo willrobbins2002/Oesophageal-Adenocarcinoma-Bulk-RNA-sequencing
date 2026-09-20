@@ -78,21 +78,10 @@ cat("QC-pass samples:", ncol(counts_pass), "\n")
 print(table(metadata_pass$TissueType))
 
 ## Define the marker panel (EDIT THIS to use any desired set of genes)
-## 'Symbol' is the official gene symbol, in capitals, add or remove rows as needed 
+## 'Symbol' is the official gene symbol, in capitals, add or remove as needed 
 marker_genes <- tibble::tibble(
   Symbol = c("TFF3", "ANXA10", "LGALS4", "ERBB2", "GATA4", "GATA6", "VEGFA",
              "CDX2", "MUC2", "KRT7", "KRT20"),
-  Source = c("Upregulated in BO",
-             "Upregulated in BO",
-             "Upregulated in BO",
-             "Amplified in OAC",
-             "Amplified in OAC",
-             "Amplified in OAC",
-             "Amplified in OAC",
-             "Master regulator of intestinal differentiation - canonical BO marker",
-             "Intestinal goblet-cell mucin - hallmark of BO metaplasia",
-             "Columnar/glandular cytokeratin - BO/gastric differential marker",
-             "Gastric-type cytokeratin - BO/gastric differential marker")
 )
 
 ## Map gene symbols to the Ensembl IDs in the count matrix 
