@@ -81,7 +81,7 @@ print(table(metadata_pass$TissueType))
 ## 'Symbol' is the official gene symbol, in capitals, add or remove as needed 
 marker_genes <- tibble::tibble(
   Symbol = c("TFF3", "ANXA10", "LGALS4", "ERBB2", "GATA4", "GATA6", "VEGFA",
-             "CDX2", "MUC2", "KRT7"),
+             "CDX2", "MUC2", "KRT7")
 )
 
 ## Map gene symbols to the Ensembl IDs in the count matrix 
