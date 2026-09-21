@@ -26,7 +26,7 @@ R packages: DESeq2, edgeR, limma, msigdbr, dplyr, tibble, ggplot2
 
 ## Notes
 - CAMERA is a test that accounts for inter-gene correlation
-- Gene set contents depend on the MSigDB release. Newer `msigdbr` versions rename the `category` and `subcategory` arguments to `collection` and `subcollection`, so you will need to update these in the script if you see an error or warning. For me, the msigdbr version is: 26.1.0
+- Gene set contents depend on the MSigDB release. Newer `msigdbr` versions rename the `category` and `subcategory` arguments to `collection` and `subcollection`, so you will need to update these in the script if you see an error or warning. For me, the `msigdbr` version is: 26.1.0
 - Gene sets are matched on Ensembl IDs. The script stops if none of the genes match
 
 ## Usage
