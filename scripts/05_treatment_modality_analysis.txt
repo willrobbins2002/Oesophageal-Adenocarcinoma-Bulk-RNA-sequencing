@@ -1,0 +1,952 @@
+## INSTALL PACKAGES IF NEEDED
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+cran_packages <- c(
+  "readxl",
+  "dplyr",
+  "tibble",
+  "stringr",
+  "readr",
+  "ggplot2",
+  "ggrepel",
+  "msigdbr"
+)
+
+bioc_packages <- c(
+  "DESeq2",
+  "fgsea",
+  "AnnotationDbi",
+  "org.Hs.eg.db"
+)
+
+for (pkg in cran_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+for (pkg in bioc_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+}
+
+## LOAD PACKAGES
+
+library(DESeq2)
+library(fgsea)
+library(msigdbr)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(readxl)
+library(dplyr)
+library(tibble)
+library(stringr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+
+
+## CHECK WORKING DIRECTORY AND INPUT FILES
+
+cat("Working directory:", getwd(), "\n")
+
+required_files <- c(
+  "Count Matrix Batch 1.xlsx",
+  "Count Matrix Batch 2.xlsx",
+  "Count Matrix Batch 3.xlsx",
+  "Moremetadata.xlsx"
+)
+
+missing_files <- required_files[
+  !file.exists(required_files)
+]
+
+if (length(missing_files) > 0) {
+  stop(
+    "These required files were not found in the working directory:\n",
+    paste(missing_files, collapse = "\n"),
+    "\n\nCurrent working directory:\n",
+    getwd()
+  )
+}
+
+
+
+## READ AND COMBINE THE THREE COUNT MATRICES
+
+cm1 <- read_excel("Count Matrix Batch 1.xlsx") %>%
+  rename(gene_id = 1)
+
+cm2 <- read_excel("Count Matrix Batch 2.xlsx") %>%
+  rename(gene_id = 1)
+
+cm3 <- read_excel("Count Matrix Batch 3.xlsx") %>%
+  rename(gene_id = 1)
+
+counts_joined <- cm1 %>%
+  full_join(cm2, by = "gene_id") %>%
+  full_join(cm3, by = "gene_id")
+
+if (sum(duplicated(counts_joined$gene_id)) > 0) {
+  stop(
+    "Duplicate gene IDs were found in the combined count matrices. ",
+    "Resolve duplicate rows before continuing."
+  )
+}
+
+gene_ids <- counts_joined$gene_id
+
+counts_all <- counts_joined %>%
+  select(-gene_id) %>%
+  as.data.frame()
+
+rownames(counts_all) <- gene_ids
+
+counts_all <- as.matrix(counts_all)
+
+counts_all <- apply(
+  counts_all,
+  2,
+  as.numeric
+)
+
+rownames(counts_all) <- gene_ids
+
+cat("Combined count matrix dimensions:\n")
+cat("Genes:", nrow(counts_all), "\n")
+cat("Samples:", ncol(counts_all), "\n")
+
+## READ AND PREPARE METADATA
+
+meta <- read_excel("Moremetadata.xlsx") %>%
+  mutate(
+    SampleName = as.character(SampleName),
+    SampleID = as.character(SampleID),
+    Batch = as.character(Batch),
+    TissueType = as.character(TissueType),
+    QCStatus = as.character(QCStatus),
+    TreatmentModality = as.character(TreatmentModality)
+  )
+
+required_metadata_columns <- c(
+  "SampleName",
+  "SampleID",
+  "Batch",
+  "TissueType",
+  "QCStatus",
+  "TreatmentModality"
+)
+
+missing_metadata_columns <- required_metadata_columns[
+  !required_metadata_columns %in% colnames(meta)
+]
+
+if (length(missing_metadata_columns) > 0) {
+  stop(
+    "These expected metadata columns are missing:\n",
+    paste(missing_metadata_columns, collapse = "\n")
+  )
+}
+
+## MATCH METADATA TO COUNT-MATRIX COLUMNS
+## Batch 1 count matrix: short aliases such as A10, B20. Batch 2/3 count matrices: SampleName values such as EN_914_21T
+
+meta_match <- meta %>%
+  mutate(
+    count_col = case_when(
+      Batch == "1" ~ sub("_.*", "", SampleName),
+      TRUE ~ SampleName
+    )
+  )
+
+cat(
+  "Count-matrix columns matched to metadata:",
+  sum(colnames(counts_all) %in% meta_match$count_col),
+  "of",
+  ncol(counts_all),
+  "\n"
+)
+
+
+
+## FILTER TO QC-PASSED OAC SAMPLES OF INTEREST
+
+meta_oac <- meta_match %>%
+  filter(
+    count_col %in% colnames(counts_all),
+    TissueType == "OAC",
+    QCStatus == "Pass",
+    TreatmentModality %in% c("Naive", "Chemo", "CRT")
+  )
+
+cat("Metadata rows after OAC/QC/treatment filters:", nrow(meta_oac), "\n")
+
+cat("\nTreatment counts before resolving duplicate aliases:\n")
+print(table(meta_oac$TreatmentModality))
+
+
+## RESOLVE DUPLICATED BATCH-1 METADATA ALIASES
+
+duplicate_aliases <- meta_oac %>%
+  count(count_col) %>%
+  filter(n > 1) %>%
+  pull(count_col)
+
+if (length(duplicate_aliases) > 0) {
+  
+  duplicate_check <- meta_oac %>%
+    filter(count_col %in% duplicate_aliases) %>%
+    group_by(count_col) %>%
+    summarise(
+      n_rows = n(),
+      n_batch = n_distinct(Batch),
+      n_tissue = n_distinct(TissueType),
+      n_qc = n_distinct(QCStatus),
+      n_treatment = n_distinct(TreatmentModality),
+      .groups = "drop"
+    )
+  
+  print(duplicate_check)
+  
+  conflicting_aliases <- duplicate_check %>%
+    filter(
+      n_batch > 1 |
+        n_tissue > 1 |
+        n_qc > 1 |
+        n_treatment > 1
+    )
+  
+  if (nrow(conflicting_aliases) > 0) {
+    stop(
+      "Some duplicate count-column aliases have conflicting metadata. ",
+      "Resolve these samples manually before analysis:\n",
+      paste(conflicting_aliases$count_col, collapse = ", ")
+    )
+  }
+}
+
+meta_oac_unique <- meta_oac %>%
+  group_by(count_col) %>%
+  slice(1) %>%
+  ungroup()
+
+cat("\nUnique OAC samples retained:", nrow(meta_oac_unique), "\n")
+# CHECK: this should match the OAC cohort size in the write-up (94)
+
+cat("\nFinal samples by treatment modality:\n")
+print(
+  meta_oac_unique %>%
+    count(TreatmentModality, name = "n_samples") %>%
+    arrange(TreatmentModality)
+)
+
+cat("\nSamples by batch and treatment:\n")
+print(
+  with(
+    meta_oac_unique,
+    table(Batch, TreatmentModality)
+  )
+)
+
+## SUBSET COUNTS AND ENSURE METADATA ORDER MATCHES
+
+meta_oac_unique <- meta_oac_unique %>%
+  arrange(
+    match(count_col, colnames(counts_all))
+  )
+
+counts_oac <- counts_all[
+  ,
+  meta_oac_unique$count_col,
+  drop = FALSE
+]
+
+rownames(meta_oac_unique) <- meta_oac_unique$count_col
+
+if (!identical(
+  colnames(counts_oac),
+  rownames(meta_oac_unique)
+)) {
+  stop(
+    "Count matrix columns and metadata rows are not in identical order."
+  )
+}
+
+meta_oac_unique$TreatmentModality <- factor(
+  meta_oac_unique$TreatmentModality,
+  levels = c(
+    "Naive",
+    "Chemo",
+    "CRT"
+  )
+)
+
+meta_oac_unique$Batch <- factor(
+  meta_oac_unique$Batch
+)
+
+cat("\nFinal treatment group sizes:\n")
+print(table(meta_oac_unique$TreatmentModality))
+
+## CLEAN ENSEMBL IDS AND PREPARE COUNTS
+
+# Remove Ensembl version suffix, eg, ENSG00000290825.2 -> ENSG00000290825
+rownames(counts_oac) <- sub(
+  "\\..*$",
+  "",
+  rownames(counts_oac)
+)
+
+# If removing version suffixes creates duplicated Ensembl IDs, sum the raw counts for those duplicated rows.
+counts_oac <- rowsum(
+  counts_oac,
+  group = rownames(counts_oac),
+  reorder = FALSE
+)
+
+if (anyNA(counts_oac)) {
+  stop(
+    "Missing values were found in the count matrix."
+  )
+}
+
+if (any(counts_oac < 0)) {
+  stop(
+    "Negative counts were found in the count matrix."
+  )
+}
+
+if (!all(counts_oac == round(counts_oac))) {
+  stop(
+    "Non-integer count values were found. ",
+    "DESeq2 requires raw integer counts."
+  )
+}
+
+storage.mode(counts_oac) <- "integer"
+
+
+## FILTER LOW-COUNT GENES
+## Keep genes with >=10 reads in at least as many samples as the smallest treatment group.
+
+min_group_n <- min(
+  table(meta_oac_unique$TreatmentModality)
+)
+
+keep_gene <- rowSums(
+  counts_oac >= 10
+) >= min_group_n
+
+counts_oac_filtered <- counts_oac[
+  keep_gene,
+  ,
+  drop = FALSE
+]
+
+cat("\nGenes before filtering:", nrow(counts_oac), "\n")
+cat("Genes after filtering:", nrow(counts_oac_filtered), "\n")
+
+## FIT DESEQ2 MODEL
+## Treatment modality only; batch is deliberately not included.
+
+dds_oac_unadjusted <- DESeqDataSetFromMatrix(
+  countData = counts_oac_filtered,
+  colData = meta_oac_unique,
+  design = ~ TreatmentModality
+)
+
+dds_oac_unadjusted <- DESeq(
+  dds_oac_unadjusted
+)
+
+cat("\nDESeq2 model coefficients:\n")
+print(
+  resultsNames(dds_oac_unadjusted)
+)
+
+## DEFINE TREATMENT CONTRASTS
+## Positive log2FC/stat direction:
+##   	Naive_vs_Chemo: higher in Naive
+##   	Naive_vs_CRT: higher in Naive
+##   	Chemo_vs_CRT: higher in Chemo
+
+comparisons <- list(
+  list(
+    numerator = "Naive",
+    denominator = "Chemo",
+    label = "Naive_vs_Chemo"
+  ),
+  list(
+    numerator = "Naive",
+    denominator = "CRT",
+    label = "Naive_vs_CRT"
+  ),
+  list(
+    numerator = "Chemo",
+    denominator = "CRT",
+    label = "Chemo_vs_CRT"
+  )
+)
+
+get_deseq_results <- function(
+    dds,
+    numerator,
+    denominator,
+    label
+) {
+  
+  res <- results(
+    dds,
+    contrast = c(
+      "TreatmentModality",
+      numerator,
+      denominator
+    )
+  )
+  
+  res_df <- as.data.frame(res) %>%
+    rownames_to_column("ensembl_id") %>%
+    arrange(padj)
+  
+  cat(
+    label,
+    ": ",
+    sum(res_df$padj < 0.05, na.rm = TRUE),
+    " genes at FDR < 0.05 out of ",
+    sum(!is.na(res_df$pvalue)),
+    " tested\n",
+    sep = ""
+  )
+  
+  res_df
+}
+
+de_results <- list()
+
+for (comp in comparisons) {
+  
+  de_results[[comp$label]] <- get_deseq_results(
+    dds = dds_oac_unadjusted,
+    numerator = comp$numerator,
+    denominator = comp$denominator,
+    label = comp$label
+  )
+}
+
+
+## MAP ENSEMBL GENE IDS TO HUMAN GENE SYMBOLS
+
+ensembl_to_symbol <- AnnotationDbi::mapIds(
+  org.Hs.eg.db,
+  keys = rownames(dds_oac_unadjusted),
+  keytype = "ENSEMBL",
+  column = "SYMBOL",
+  multiVals = "first"
+)
+
+gene_annotation <- tibble(
+  ensembl_id = names(ensembl_to_symbol),
+  gene_symbol = unname(ensembl_to_symbol)
+)
+
+cat("\nEnsembl-to-symbol mapping summary:\n")
+
+print(
+  gene_annotation %>%
+    summarise(
+      genes_total = n(),
+      mapped_symbols = sum(!is.na(gene_symbol)),
+      unmapped_symbols = sum(is.na(gene_symbol))
+    )
+)
+
+de_results <- lapply(
+  de_results,
+  function(res_df) {
+    res_df %>%
+      left_join(
+        gene_annotation,
+        by = "ensembl_id"
+      ) %>%
+      relocate(
+        gene_symbol,
+        .after = ensembl_id
+      )
+  }
+)
+
+## CREATE MSIGDB HALLMARK PATHWAY LIST
+
+hallmark_df <- msigdbr(
+  species = "Homo sapiens",
+  collection = "H"
+)
+
+hallmark_pathways <- hallmark_df %>%
+  select(gs_name, gene_symbol) %>%
+  filter(
+    !is.na(gene_symbol),
+    gene_symbol != ""
+  ) %>%
+  distinct() %>%
+  split(
+    x = .$gene_symbol,
+    f = .$gs_name
+  )
+
+cat("\nNumber of Hallmark pathways:", length(hallmark_pathways), "\n")
+
+## RUN PRERANKED GSEA
+
+run_fgsea <- function(
+    res_df,
+    pathways,
+    label,
+    minSize = 15,
+    maxSize = 500
+) {
+  
+  required_cols <- c(
+    "ensembl_id",
+    "gene_symbol",
+    "stat"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    colnames(res_df)
+  )
+  
+  if (length(missing_cols) > 0) {
+    stop(
+      "DESeq2 results are missing required columns: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  rank_df <- res_df %>%
+    filter(
+      !is.na(gene_symbol),
+      gene_symbol != "",
+      !is.na(stat),
+      is.finite(stat)
+    ) %>%
+    group_by(gene_symbol) %>%
+    slice_max(
+      order_by = abs(stat),
+      n = 1,
+      with_ties = FALSE
+    ) %>%
+    ungroup() %>%
+    select(gene_symbol, stat)
+  
+  ranks <- deframe(rank_df)
+  
+  ranks <- sort(
+    ranks,
+    decreasing = TRUE
+  )
+  
+  cat("\n", label, "\n", sep = "")
+  cat("Ranked genes:", length(ranks), "\n")
+  cat("Positive Wald statistics:", sum(ranks > 0), "\n")
+  cat("Negative Wald statistics:", sum(ranks < 0), "\n")
+  
+  if (!any(ranks > 0) || !any(ranks < 0)) {
+    stop(
+      "The GSEA ranking has only one direction. ",
+      "Use signed DESeq2 `stat` values without filtering to DEGs."
+    )
+  }
+  
+  pathway_genes <- unique(
+    unlist(pathways)
+  )
+  
+  overlap_n <- sum(
+    names(ranks) %in% pathway_genes
+  )
+  
+  cat(
+    "Genes overlapping Hallmark pathways:",
+    overlap_n,
+    "\n"
+  )
+  
+  if (overlap_n < 100) {
+    warning(
+      "Low overlap between ranked gene symbols and pathway gene symbols. ",
+      "Check gene identifier mapping."
+    )
+  }
+  
+  fgseaMultilevel(
+    pathways = pathways,
+    stats = ranks,
+    minSize = minSize,
+    maxSize = maxSize,
+    scoreType = "std"
+  ) %>%
+    as.data.frame() %>%
+    arrange(padj)
+}
+
+set.seed(123)
+
+gsea_results <- list()
+
+for (comp in comparisons) {
+  
+  gsea_results[[comp$label]] <- run_fgsea(
+    res_df = de_results[[comp$label]],
+    pathways = hallmark_pathways,
+    label = comp$label
+  )
+  
+  cat(
+    comp$label,
+    ": ",
+    sum(
+      gsea_results[[comp$label]]$padj < 0.25,
+      na.rm = TRUE
+    ),
+    " pathways at GSEA FDR < 0.25\n",
+    sep = ""
+  )
+}
+
+
+## CREATE BALANCED TOP-10 GSEA PATHWAY PLOTS
+## Five positive-NES pathways: enriched in the first-named group.
+## Five negative-NES pathways: enriched in the second-named group.
+
+make_top10_gsea_plot <- function(
+    fg_res,
+    label,
+    group_1,
+    group_2,
+    n_total = 10
+) {
+  
+  n_each <- floor(
+    n_total / 2
+  )
+  
+  plot_input <- fg_res %>%
+    filter(
+      !is.na(NES),
+      !is.na(padj),
+      is.finite(NES),
+      is.finite(padj)
+    )
+  
+  if (nrow(plot_input) == 0) {
+    stop(
+      label,
+      ": no valid GSEA pathway results were returned."
+    )
+  }
+  
+  top_positive <- plot_input %>%
+    filter(NES > 0) %>%
+    arrange(
+      padj,
+      desc(NES)
+    ) %>%
+    slice_head(n = n_each)
+  
+  top_negative <- plot_input %>%
+    filter(NES < 0) %>%
+    arrange(
+      padj,
+      NES
+    ) %>%
+    slice_head(n = n_each)
+  
+  plot_df <- bind_rows(
+    top_positive,
+    top_negative
+  ) %>%
+    mutate(
+      direction = if_else(
+        NES > 0,
+        paste0("Enriched in ", group_1),
+        paste0("Enriched in ", group_2)
+      ),
+      pathway_label = pathway %>%
+        str_remove("^HALLMARK_") %>%
+        str_replace_all("_", " ") %>%
+        str_to_title()
+    ) %>%
+    arrange(NES) %>%
+    mutate(
+      pathway_label = factor(
+        pathway_label,
+        levels = unique(pathway_label)
+      )
+    )
+  
+  if (nrow(plot_df) == 0) {
+    stop(
+      label,
+      ": no positive or negative NES pathways were available."
+    )
+  }
+  
+  fill_colours <- setNames(
+    c(
+      "#C0392B",
+      "#2874A6"
+    ),
+    c(
+      paste0("Enriched in ", group_1),
+      paste0("Enriched in ", group_2)
+    )
+  )
+  
+  ggplot(
+    plot_df,
+    aes(
+      x = pathway_label,
+      y = NES,
+      fill = direction
+    )
+  ) +
+    geom_col(
+      width = 0.75
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linewidth = 0.4,
+      colour = "black"
+    ) +
+    coord_flip() +
+    scale_fill_manual(
+      values = fill_colours
+    ) +
+    labs(
+      title = paste0(
+        "Hallmark GSEA: ",
+        label
+      ),
+      subtitle = paste0(
+        "Top ",
+        n_total,
+        " pathways: ",
+        n_each,
+        " enriched in each group, ranked by adjusted p-value"
+      ),
+      x = NULL,
+      y = "Normalised enrichment score (NES)",
+      fill = NULL
+    ) +
+    theme_classic(
+      base_size = 12
+    ) +
+    theme(
+      legend.position = "bottom",
+      axis.text.y = element_text(size = 9),
+      plot.title = element_text(face = "bold")
+    )
+}
+
+
+## GENERATE THE THREE TOP-10 PLOTS
+
+
+gsea_plot_naive_chemo_top10 <- make_top10_gsea_plot(
+  fg_res = gsea_results$Naive_vs_Chemo,
+  label = "Naive vs Chemo",
+  group_1 = "Naive",
+  group_2 = "Chemo",
+  n_total = 10
+)
+
+gsea_plot_naive_crt_top10 <- make_top10_gsea_plot(
+  fg_res = gsea_results$Naive_vs_CRT,
+  label = "Naive vs CRT",
+  group_1 = "Naive",
+  group_2 = "CRT",
+  n_total = 10
+)
+
+gsea_plot_chemo_crt_top10 <- make_top10_gsea_plot(
+  fg_res = gsea_results$Chemo_vs_CRT,
+  label = "Chemo vs CRT",
+  group_1 = "Chemo",
+  group_2 = "CRT",
+  n_total = 10
+)
+
+print(gsea_plot_naive_chemo_top10)
+
+print(gsea_plot_naive_crt_top10)
+
+print(gsea_plot_chemo_crt_top10)
+
+
+## CREATE OUTPUT FOLDERS
+## Tables and R objects go to results/, plots go to figures/, both inside the current working directory 
+
+results_dir <- "results"
+figures_dir <- "figures"
+
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(figures_dir, showWarnings = FALSE, recursive = TRUE)
+
+cat(
+  "\nTables and R objects will be saved to:\n",
+  normalizePath(results_dir),
+  "\nPlots will be saved to:\n",
+  normalizePath(figures_dir),
+  "\n"
+)
+
+## SAVE TOP-10 GSEA PLOTS
+
+ggsave(
+  filename = file.path(
+    figures_dir,
+    "Naive_vs_Chemo_Hallmark_GSEA_top10.png"
+  ),
+  plot = gsea_plot_naive_chemo_top10,
+  width = 10,
+  height = 6,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(
+    figures_dir,
+    "Naive_vs_CRT_Hallmark_GSEA_top10.png"
+  ),
+  plot = gsea_plot_naive_crt_top10,
+  width = 10,
+  height = 6,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  filename = file.path(
+    figures_dir,
+    "Chemo_vs_CRT_Hallmark_GSEA_top10.png"
+  ),
+  plot = gsea_plot_chemo_crt_top10,
+  width = 10,
+  height = 6,
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+## SAVE GSEA RESULTS TABLES
+
+write_csv(
+  gsea_results$Naive_vs_Chemo,
+  file.path(
+    results_dir,
+    "Naive_vs_Chemo_Hallmark_GSEA.csv"
+  )
+)
+
+write_csv(
+  gsea_results$Naive_vs_CRT,
+  file.path(
+    results_dir,
+    "Naive_vs_CRT_Hallmark_GSEA.csv"
+  )
+)
+
+write_csv(
+  gsea_results$Chemo_vs_CRT,
+  file.path(
+    results_dir,
+    "Chemo_vs_CRT_Hallmark_GSEA.csv"
+  )
+)
+
+## SAVE DESEQ2 GENE-LEVEL RESULTS TABLES
+
+write_csv(
+  de_results$Naive_vs_Chemo,
+  file.path(
+    results_dir,
+    "Naive_vs_Chemo_DESeq2_gene_results.csv"
+  )
+)
+
+write_csv(
+  de_results$Naive_vs_CRT,
+  file.path(
+    results_dir,
+    "Naive_vs_CRT_DESeq2_gene_results.csv"
+  )
+)
+
+write_csv(
+  de_results$Chemo_vs_CRT,
+  file.path(
+    results_dir,
+    "Chemo_vs_CRT_DESeq2_gene_results.csv"
+  )
+)
+
+## SAVE R OBJECTS FOR REPRODUCIBILITY
+
+saveRDS(
+  dds_oac_unadjusted,
+  file.path(
+    results_dir,
+    "dds_oac_unadjusted.rds"
+  )
+)
+
+saveRDS(
+  gsea_results,
+  file.path(
+    results_dir,
+    "gsea_results_Hallmark.rds"
+  )
+)
+
+saveRDS(
+  de_results,
+  file.path(
+    results_dir,
+    "de_results.rds"
+  )
+)
+
+saveRDS(
+  meta_oac_unique,
+  file.path(
+    results_dir,
+    "metadata_OAC_used_in_analysis.rds"
+  )
+)
+
+## CONFIRM SAVED OUTPUTS
+
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(results_dir, "session_info_treatment_modality.txt")
+)
+
+cat("\nSaved files:\n")
+
+print(
+  list.files(
+    c(results_dir, figures_dir),
+    full.names = TRUE
+  )
+)
+
+cat("\nAnalysis completed successfully.\n")
