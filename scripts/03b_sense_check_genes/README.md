@@ -1,4 +1,4 @@
-## OAC RNA-seq Sense Check: Marker Gene Expression
+## OAC RNA-seq Sense Check Gene Expressions
 
 Expression of literature-reported marker genes across normal stomach, normal oesophagus, Barrett's oesophagus and OAC, used to check that the data behave as expected biologically
 
