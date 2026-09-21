@@ -1,0 +1,1312 @@
+## LOAD PACKAGES
+library(readxl)
+library(dplyr)
+library(stringr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(tibble)
+library(patchwork)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+
+## FILE LOCATIONS
+
+metadata_file <- "Moremetadata.xlsx"
+
+count_files <- c(
+  "Count Matrix Batch 1.xlsx",
+  "Count Matrix Batch 2.xlsx",
+  "Count Matrix Batch 3.xlsx"
+)
+
+output_dir <- "Full_Triad_Analysis"
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+
+## LOAD AND CLEAN METADATA
+
+metadata <- read_excel(metadata_file, sheet = "Sheet1") %>%
+  mutate(
+    TissueType = str_trim(TissueType),
+    TissueType = factor(
+      TissueType,
+      levels = c(
+        "Normal Stomach",
+        "Normal Oesophagus",
+        "Barrett's Oesophagus",
+        "OAC"
+      )
+    ),
+    Batch = factor(Batch)
+  ) %>%
+  mutate(
+    MatrixID = if_else(
+      Batch == "1",
+      str_extract(SampleName, "^[^_]+"),
+      SampleName
+    )
+  )
+
+## Check metadata
+table(metadata$TissueType, useNA = "always")
+
+head(
+  metadata %>%
+    select(
+      SampleName,
+      MatrixID,
+      Batch,
+      TissueType,
+      everything()
+    )
+)
+
+
+## IDENTIFY FULL TRIAD PATIENTS
+
+
+triad_tissues <- c(
+  "Normal Oesophagus",
+  "Barrett's Oesophagus",
+  "OAC"
+)
+
+metadata_usable <- metadata %>%
+  filter(
+    TissueType %in% triad_tissues,
+    str_to_lower(str_trim(QCStatus)) == "pass"
+  )
+
+triad_patients <- metadata_usable %>%
+  group_by(SampleID) %>%
+  summarise(
+    has_normal = any(TissueType == "Normal Oesophagus"),
+    has_barretts = any(TissueType == "Barrett's Oesophagus"),
+    has_oac = any(TissueType == "OAC"),
+    .groups = "drop"
+  ) %>%
+  filter(
+    has_normal,
+    has_barretts,
+    has_oac
+  ) %>%
+  pull(SampleID)
+
+cat("Number of full triad patients:", length(triad_patients), "\n")
+
+triad_metadata <- metadata_usable %>%
+  filter(
+    SampleID %in% triad_patients,
+    TissueType %in% triad_tissues
+  )
+
+cat("\nSamples per tissue:\n")
+print(table(triad_metadata$TissueType))
+
+cat("\nFinal triad patients:\n")
+print(
+  triad_metadata %>%
+    distinct(SampleID, TissueType) %>%
+    arrange(SampleID, TissueType)
+)
+
+## LOAD AND CLEAN METADATA
+
+metadata <- read_excel(
+  metadata_file,
+  sheet = "Sheet1"
+) %>%
+  mutate(
+    TissueType = str_trim(TissueType),
+
+    TissueType = factor(
+      TissueType,
+      levels = c(
+        "Normal Stomach",
+        "Normal Oesophagus",
+        "Barrett's Oesophagus",
+        "OAC"
+      )
+    ),
+
+    Batch = factor(Batch)
+  )
+
+
+## Check tissue distribution
+table(
+  metadata$TissueType,
+  useNA = "always"
+)
+
+
+## CREATE MATRIXID 
+## Batch 1 count-matrix columns use the short code before "_". Batch 2 and Batch 3 columns match SampleName exactly.
+
+metadata <- metadata %>%
+  mutate(
+    MatrixID = if_else(
+      Batch == "1",
+      str_extract(
+        SampleName,
+        "^[^_]+"
+      ),
+      SampleName
+    )
+  )
+
+
+## Check MatrixIDs
+head(
+  metadata %>%
+    select(
+      SampleName,
+      MatrixID,
+      Batch,
+      TissueType
+    )
+)
+
+## IDENTIFY FULL TRIAD PATIENTS
+
+triad_tissues <- c(
+    "Normal Oesophagus",
+    "Barrett's Oesophagus",
+    "OAC"
+)
+
+## Keep only the three tissues required for the triad and remove samples that failed QC
+metadata_usable <- metadata %>%
+    filter(
+        TissueType %in% triad_tissues,
+        str_to_lower(str_trim(QCStatus)) == "pass"
+    )
+
+## Identify patients who have ALL THREE required tissues
+
+## IMPORTANT: A patient can also have normal stomach. They are still a valid triad patient as long as they have normal oesophagus + Barrett's + OAC.
+
+triad_patients <- metadata_usable %>%
+    group_by(SampleID) %>%
+    summarise(
+        has_normal = any(TissueType == "Normal Oesophagus"),
+        has_barretts = any(TissueType == "Barrett's Oesophagus"),
+        has_oac = any(TissueType == "OAC"),
+        .groups = "drop"
+    ) %>%
+    filter(
+        has_normal,
+        has_barretts,
+        has_oac
+    ) %>%
+    pull(SampleID)
+
+cat(
+    "Number of full triad patients:",
+    length(triad_patients),
+    "\n"
+)
+
+cat("\nFull triad patient IDs:\n")
+print(triad_patients)
+
+
+## Keep only the three required tissue types from the complete triad patients
+
+triad_metadata <- metadata_usable %>%
+    filter(
+        SampleID %in% triad_patients,
+        TissueType %in% triad_tissues
+    )
+
+
+## CHECK FINAL TRIAD COHORT
+
+cat("\nSamples per tissue:\n")
+print(table(triad_metadata$TissueType))
+
+cat("\nPatients and tissues in final triad cohort:\n")
+
+print(
+    triad_metadata %>%
+        distinct(SampleID, TissueType) %>%
+        arrange(SampleID, TissueType)
+)
+
+## CHECK THAT EACH PATIENT HAS EXACTLY THREE SAMPLES
+
+sample_check <- triad_metadata %>%
+
+  count(
+    SampleID,
+    TissueType
+  )
+
+
+if (any(sample_check$n != 1)) {
+
+  stop(
+    "More than one sample remains for at least one ",
+    "patient/tissue combination."
+  )
+
+}
+
+
+patient_sample_counts <- triad_metadata %>%
+
+  count(
+    SampleID
+  )
+
+if (any(patient_sample_counts$n != 3)) {
+
+  stop(
+    "At least one patient does not have exactly three samples."
+  )
+
+}
+
+## SET FACTOR LEVELS
+
+triad_metadata <- triad_metadata %>%
+    
+    mutate(
+        
+        PatientID = factor(
+            SampleID,
+            levels = triad_patients
+        ),
+        
+        TissueType = factor(
+            TissueType,
+            levels = triad_tissues
+        )
+        
+    ) %>%
+    
+    arrange(
+        PatientID,
+        TissueType
+    )
+
+## PRINT SELECTED SAMPLES
+
+cat(
+    "Samples selected for the triad analysis:\n\n"
+)
+
+print(
+    triad_metadata %>%
+        select(
+            SampleName,
+            MatrixID,
+            SampleID,
+            TissueType,
+            QCStatus
+        )
+)
+
+## READ COUNT MATRICES
+
+read_count_matrix <- function(file) {
+
+  cat(
+    "\nReading:",
+    basename(file),
+    "\n"
+  )
+
+  df <- read_excel(
+    file
+  )
+
+  if (ncol(df) < 2) {
+
+    stop(
+      "Count matrix contains fewer than two columns:\n",
+      file
+    )
+
+  }
+
+  colnames(df)[1] <- "EnsemblID"
+
+  df$EnsemblID <- as.character(
+    df$EnsemblID
+  )
+
+## Remove Ensembl version numbers
+  df$EnsemblID <- sub(
+    "\\..*$",
+    "",
+    df$EnsemblID
+  )
+
+## Remove blank gene IDs
+  df <- df %>%
+
+    filter(
+      !is.na(EnsemblID),
+      EnsemblID != ""
+    )
+
+## Convert counts to numeric
+  df <- df %>%
+
+    mutate(
+
+      across(
+        -EnsemblID,
+        ~ as.numeric(.x)
+      )
+
+    )
+
+  
+# If duplicate Ensembl IDs occur within a batch, sum their counts.
+  if (anyDuplicated(df$EnsemblID)) {
+
+    warning(
+      "Duplicate Ensembl IDs detected in ",
+      basename(file),
+      ". Counts will be summed."
+    )
+
+    df <- df %>%
+
+      group_by(
+        EnsemblID
+      ) %>%
+
+      summarise(
+
+        across(
+          everything(),
+          ~ sum(
+            .x,
+            na.rm = TRUE
+          )
+        ),
+
+        .groups = "drop"
+
+      )
+
+  }
+
+  return(df)
+
+}
+
+
+count_matrices <- lapply(
+  count_files,
+  read_count_matrix
+)
+
+
+## COMBINE COUNT MATRICES
+
+all_genes <- Reduce(
+  union,
+  lapply(
+    count_matrices,
+    function(x) x$EnsemblID
+  )
+)
+
+cat(
+  "\nTotal unique genes:",
+  length(all_genes),
+  "\n"
+)
+
+
+counts_combined <- data.frame(
+  EnsemblID = all_genes,
+  stringsAsFactors = FALSE
+)
+
+
+for (i in seq_along(count_matrices)) {
+
+  counts_combined <- counts_combined %>%
+
+    left_join(
+      count_matrices[[i]],
+      by = "EnsemblID"
+    )
+
+}
+
+
+## Missing genes in a batch = zero counts
+counts_combined[is.na(counts_combined)] <- 0
+
+
+## CHECK THAT ALL TRIAD SAMPLES EXIST
+
+available_samples <- colnames(
+    counts_combined
+)[
+    colnames(counts_combined) != "EnsemblID"
+]
+
+missing_samples <- setdiff(
+    triad_metadata$MatrixID,
+    available_samples
+)
+
+if (length(missing_samples) > 0) {
+    
+    stop(
+        "The following MatrixIDs are present in the metadata ",
+        "but not in the count matrices:\n\n",
+        
+        paste(
+            missing_samples,
+            collapse = "\n"
+        )
+    )
+    
+}
+
+cat(
+    "All ",
+    nrow(triad_metadata),
+    " triad samples were found in the count matrices.\n",
+    sep = ""
+)
+
+
+## SUBSET COUNT MATRIX TO TRIAD SAMPLES
+
+triad_sample_names <- triad_metadata$MatrixID
+
+triad_counts <- counts_combined %>%
+
+  select(
+    EnsemblID,
+    all_of(triad_sample_names)
+  )
+
+
+count_matrix <- as.matrix(
+  triad_counts %>%
+    select(
+      -EnsemblID
+    )
+)
+
+
+rownames(count_matrix) <- triad_counts$EnsemblID
+
+storage.mode(count_matrix) <- "numeric"
+
+
+cat(
+  "\nTriad count matrix dimensions:\n"
+)
+
+print(
+  dim(count_matrix)
+)
+
+
+## ENSURE SAMPLE ORDER MATCHES METADATA
+
+## Reorder count matrix columns so that they match the order of the metadata rows
+
+count_matrix <- count_matrix[
+    ,
+    triad_metadata$MatrixID,
+    drop = FALSE
+]
+
+## Confirm that the order now matches
+
+if (!identical(
+    colnames(count_matrix),
+    triad_metadata$MatrixID
+)) {
+    stop(
+        "Count matrix columns and metadata MatrixIDs still do not match."
+    )
+}
+
+cat(
+    "Count matrix and metadata are now in identical sample order.\n"
+)
+
+## SAVE TRIAD DATA
+
+write.csv(
+
+  triad_metadata,
+
+  file.path(
+    output_dir,
+    "full_triad_metadata.csv"
+  ),
+
+  row.names = FALSE
+
+)
+
+
+write.csv(
+
+  count_matrix,
+
+  file.path(
+    output_dir,
+    "full_triad_counts.csv"
+  )
+
+)
+
+
+## PREPARE DESEQ2 METADATA
+
+coldata <- as.data.frame(
+    triad_metadata
+)
+
+## Use MatrixID because these are the column names of the count matrix
+rownames(coldata) <- coldata$MatrixID
+
+# Make sure metadata is in exactly the same order as the count matrix
+coldata <- coldata[
+    colnames(count_matrix),
+    ,
+    drop = FALSE
+]
+
+coldata$PatientID <- factor(
+    coldata$SampleID,
+    levels = triad_patients
+)
+
+coldata$TissueType <- factor(
+    coldata$TissueType,
+    levels = triad_tissues
+)
+
+if (!identical(
+    rownames(coldata),
+    colnames(count_matrix)
+)) {
+    stop(
+        "DESeq2 metadata rownames and count matrix columns ",
+        "are not in the same order."
+    )
+}
+
+cat("DESeq2 metadata prepared successfully.\n")
+
+## CREATE DESEQ2 OBJECT
+## NOTE: Batch is deliberately NOT included
+## 	 Treatment modality is deliberately NOT included
+
+
+dds <- DESeqDataSetFromMatrix(
+
+  countData = round(
+    count_matrix
+  ),
+
+  colData = coldata,
+
+  design = ~ PatientID + TissueType
+
+)
+
+
+## FILTER LOW-COUNT GENES
+## Retain genes with >=10 counts in at least 3 samples
+
+keep <- rowSums(
+  counts(dds) >= 10
+) >= 3
+
+
+cat(
+  "\nGenes before filtering:",
+  nrow(dds),
+  "\n"
+)
+
+
+dds <- dds[
+  keep,
+]
+
+
+cat(
+  "Genes after filtering:",
+  nrow(dds),
+  "\n"
+)
+
+
+## RUN DESEQ2
+
+dds <- DESeq(
+  dds
+)
+
+
+## CHECK MODEL
+
+cat(
+  "\nDESeq2 design:\n"
+)
+
+print(
+  design(dds)
+)
+
+
+cat(
+  "\nDESeq2 coefficient names:\n"
+)
+
+print(
+  resultsNames(dds)
+)
+
+
+## DEFINE CONTRASTS
+
+
+contrast_specs <- list(
+
+  Barrett_vs_Normal = c(
+    "TissueType",
+    "Barrett's Oesophagus",
+    "Normal Oesophagus"
+  ),
+
+  OAC_vs_Barrett = c(
+    "TissueType",
+    "OAC",
+    "Barrett's Oesophagus"
+  ),
+
+  OAC_vs_Normal = c(
+    "TissueType",
+    "OAC",
+    "Normal Oesophagus"
+  )
+
+)
+
+
+## FUNCTION TO PREPARE RESULTS
+
+
+prepare_results <- function(
+    dds,
+    contrast,
+    contrast_name
+) {
+
+  res <- results(
+    dds,
+    contrast = contrast,
+    alpha = 0.05
+  )
+
+
+  results_df <- as.data.frame(
+    res
+  ) %>%
+
+    rownames_to_column(
+      "EnsemblID"
+    ) %>%
+
+    mutate(
+
+      EnsemblID = sub(
+        "\\..*$",
+        "",
+        EnsemblID
+      )
+
+    )
+
+
+  ## Map Ensembl IDs to genes 
+  gene_symbols <- AnnotationDbi::mapIds(
+
+    org.Hs.eg.db,
+
+    keys = results_df$EnsemblID,
+
+    keytype = "ENSEMBL",
+
+    column = "SYMBOL",
+
+    multiVals = "first"
+
+  )
+
+
+  results_df$Gene <- unname(
+    gene_symbols[
+      results_df$EnsemblID
+    ]
+  )
+
+
+  results_df <- results_df %>%
+
+    mutate(
+
+      Contrast = contrast_name,
+
+      padj_plot = ifelse(
+        is.na(padj),
+        1,
+        padj
+      ),
+
+      neg_log10_padj = -log10(
+        pmax(
+          padj_plot,
+          .Machine$double.xmin
+        )
+      ),
+
+      Significant = case_when(
+
+        !is.na(padj) &
+          padj < 0.05 &
+          log2FoldChange > 0 ~
+          "Upregulated",
+
+        !is.na(padj) &
+          padj < 0.05 &
+          log2FoldChange < 0 ~
+          "Downregulated",
+
+        TRUE ~
+          "Not significant"
+
+      )
+
+    )
+
+
+  return(
+    results_df
+  )
+
+}
+
+
+## RUN ALL THREE CONTRASTS
+
+results_list <- lapply(
+
+  names(
+    contrast_specs
+  ),
+
+  function(contrast_name) {
+
+    prepare_results(
+
+      dds = dds,
+
+      contrast =
+        contrast_specs[[contrast_name]],
+
+      contrast_name =
+        contrast_name
+
+    )
+
+  }
+
+)
+
+
+names(results_list) <- names(
+  contrast_specs
+)
+
+
+## EXPORT DESEQ2 RESULTS
+
+for (contrast_name in names(results_list)) {
+
+  write.csv(
+
+    results_list[[contrast_name]],
+
+    file.path(
+      output_dir,
+      paste0(
+        "DESeq2_",
+        contrast_name,
+        ".csv"
+      )
+    ),
+
+    row.names = FALSE
+
+  )
+
+}
+
+
+## SUMMARISE DIFFERENTIAL EXPRESSION
+
+cat(
+    "\n============================================\n"
+)
+
+cat(
+    "DIFFERENTIAL EXPRESSION SUMMARY\n"
+)
+
+cat(
+    "============================================\n\n"
+)
+
+summary_table <- lapply(
+    
+    names(results_list),
+    
+    function(contrast_name) {
+        
+        res <- results_list[[contrast_name]]
+        
+        res_valid <- res %>%
+            filter(!is.na(padj))
+        
+        ## Significant genes
+        significant <- res_valid %>%
+            filter(padj < 0.05)
+        
+        ## Upregulated genes
+        upregulated <- significant %>%
+            filter(log2FoldChange > 0)
+        
+        ## Downregulated genes
+        downregulated <- significant %>%
+            filter(log2FoldChange < 0)
+        
+        tibble(
+            Contrast = contrast_name,
+            Significant = nrow(significant),
+            Upregulated = nrow(upregulated),
+            Downregulated = nrow(downregulated)
+        )
+    }
+) %>%
+    bind_rows()
+
+print(summary_table)
+
+write.csv(
+    summary_table,
+    file.path(
+        output_dir,
+        "DESeq2_summary.csv"
+    ),
+    row.names = FALSE
+)
+
+## VOLCANO PLOT FUNCTION
+
+make_volcano <- function(
+    results_df,
+    plot_title,
+    x_label
+) {
+
+
+  ## Label the five most significant upregulated and five most significant downregulated genes
+
+  label_df <- results_df %>%
+
+    filter(
+
+      !is.na(padj),
+
+      !is.na(log2FoldChange),
+
+      !is.na(Gene),
+
+      Gene != "",
+
+      padj < 0.05
+
+    ) %>%
+
+    group_by(
+      Significant
+    ) %>%
+
+    arrange(
+      padj
+    ) %>%
+
+    slice_head(
+      n = 5
+    ) %>%
+
+    ungroup()
+
+
+  ggplot(
+
+    results_df,
+
+    aes(
+      x = log2FoldChange,
+      y = neg_log10_padj
+    )
+
+  ) +
+
+    geom_point(
+
+      aes(
+        colour = Significant
+      ),
+
+      alpha = 0.65,
+
+      size = 1.5
+
+    ) +
+
+    geom_hline(
+
+      yintercept = -log10(0.05),
+
+      linetype = "dashed",
+
+      linewidth = 0.5
+
+    ) +
+
+    geom_vline(
+
+      xintercept = 0,
+
+      linetype = "dashed",
+
+      linewidth = 0.5
+
+    ) +
+
+    geom_text_repel(
+
+      data = label_df,
+
+      aes(
+        label = Gene
+      ),
+
+      size = 3.5,
+
+      max.overlaps = Inf,
+
+      box.padding = 0.5,
+
+      point.padding = 0.25,
+
+      min.segment.length = 0,
+
+      show.legend = FALSE
+
+    ) +
+
+    scale_colour_manual(
+
+      values = c(
+
+        "Upregulated" = "firebrick2",
+
+        "Downregulated" = "steelblue2",
+
+        "Not significant" = "grey70"
+
+      )
+
+    ) +
+
+    labs(
+
+      title = plot_title,
+
+      subtitle =
+        "Seven-patient matched triad cohort",
+
+      x = x_label,
+
+      y =
+        expression(
+          -log[10](
+            "adjusted p-value"
+          )
+        ),
+
+      colour = NULL
+
+    ) +
+
+    theme_bw() +
+
+    theme(
+
+      plot.title =
+        element_text(
+          face = "bold",
+          size = 14
+        ),
+
+      plot.subtitle =
+        element_text(
+          size = 11
+        ),
+
+      axis.title =
+        element_text(
+          face = "bold"
+        ),
+
+      legend.position =
+        "bottom",
+
+      panel.grid.minor =
+        element_blank()
+
+    )
+
+}
+
+
+## CREATE VOLCANO PLOTS
+
+p_barrett_normal <- make_volcano(
+
+  results_list$Barrett_vs_Normal,
+
+  "Barrett's Oesophagus vs Normal Oesophagus",
+
+  "log2 fold change\n(Barrett's Oesophagus vs Normal Oesophagus)"
+
+)
+
+
+p_oac_barrett <- make_volcano(
+
+  results_list$OAC_vs_Barrett,
+
+  "OAC vs Barrett's Oesophagus",
+
+  "log2 fold change\n(OAC vs Barrett's Oesophagus)"
+
+)
+
+
+p_oac_normal <- make_volcano(
+
+  results_list$OAC_vs_Normal,
+
+  "OAC vs Normal Oesophagus",
+
+  "log2 fold change\n(OAC vs Normal Oesophagus)"
+
+)
+
+
+## DISPLAY PLOTS
+
+print(
+  p_barrett_normal
+)
+
+print(
+  p_oac_barrett
+)
+
+print(
+  p_oac_normal
+)
+
+
+## SAVE INDIVIDUAL VOLCANO PLOTS
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Volcano_Barrett_vs_Normal.png"
+  ),
+
+  p_barrett_normal,
+
+  width = 9,
+
+  height = 7,
+
+  dpi = 300
+
+)
+
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Volcano_OAC_vs_Barrett.png"
+  ),
+
+  p_oac_barrett,
+
+  width = 9,
+
+  height = 7,
+
+  dpi = 300
+
+)
+
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Volcano_OAC_vs_Normal.png"
+  ),
+
+  p_oac_normal,
+
+  width = 9,
+
+  height = 7,
+
+  dpi = 300
+
+)
+
+
+## COMBINE THREE VOLCANO PLOTS
+
+combined_volcano <- (
+
+  p_barrett_normal |
+
+    p_oac_barrett |
+
+    p_oac_normal
+
+) +
+
+  plot_annotation(
+
+    title =
+      "Differential Gene Expression Across the Full Triad Cohort"
+
+  )
+
+
+print(
+  combined_volcano
+)
+
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Full_Triad_Volcano_Plots.png"
+  ),
+
+  combined_volcano,
+
+  width = 18,
+
+  height = 7,
+
+  dpi = 300
+
+)
+
+
+## SAVE DESEQ2 OBJECT
+
+saveRDS(
+
+  dds,
+
+  file.path(
+    output_dir,
+    "dds_full_triad.rds"
+  )
+
+)
+
+
+## FINAL SUMMARY
+
+cat(
+  "\n============================================\n"
+)
+
+cat(
+  "FULL TRIAD ANALYSIS COMPLETE\n"
+)
+
+cat(
+  "============================================\n\n"
+)
+
+cat(
+  "Patients included:",
+  length(triad_patients),
+  "\n"
+)
+
+cat(
+  "Samples included:",
+  ncol(count_matrix),
+  "\n"
+)
+
+cat(
+  "Genes analysed after filtering:",
+  nrow(dds),
+  "\n\n"
+)
+
+cat(
+  "Batch correction: NOT USED\n"
+)
+
+cat(
+  "Treatment modality: NOT INCLUDED\n"
+)
+
+cat(
+  "Patient matching: INCLUDED\n\n"
+)
+
+cat(
+  "Output directory:\n",
+  output_dir,
+  "\n"
+)
